@@ -848,7 +848,6 @@ function setCardVal(cardId, itemId, raw) {
     it.value = parseFloat((raw || '').replace(/\./g, '').replace(',', '.')) || 0;
   }
   scheduleSave();
-  render(); // Adicione isso aqui
 }
 function setInstall(cardId, itemId, which, val) {
   const it = getCardItem(cardId, itemId);
