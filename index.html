@@ -532,13 +532,13 @@ function renderSummary(calc, summary) {
   return `
   <div class="panel">
     <div class="panel-header"><div class="panel-title">${I.trend(13)} Resumo Financeiro</div></div>
-    <div class="stat-row">
-      <span class="stat-label">Renda Mensal</span>
-      <input class="stat-input" type="text" inputmode="decimal"
-        value="${summary.rendaMensal ? fmt(summary.rendaMensal) : ''}" placeholder="0,00"
-        onchange="updateSummary('rendaMensal',this.value)"
-        onblur="this.value=this.value?(parseFloat(this.value.replace(',','.'))||0).toFixed(2).replace('.',','):''"/>
-    </div>
+<div class="stat-row">
+  <span class="stat-label">Renda Mensal</span>
+  <input class="stat-input" type="text" inputmode="decimal"
+    value="${summary.rendaMensal ? fmt(summary.rendaMensal) : ''}" placeholder="0,00"
+    onblur="updateSummary('rendaMensal', this.value); formatAmt(this); render();"
+    onkeydown="if(event.key==='Enter' || event.key==='Tab') { updateSummary('rendaMensal', this.value); render(); }"/>
+</div>
     <div class="stat-row"><span class="stat-label">A Receber</span><span class="stat-value text-green fnum">R$ ${fmt(calc.totalReceiv)}</span></div>
     <div class="stat-row"><span class="stat-label">Total do Mês</span><span class="stat-value fnum">R$ ${fmt(calc.totalToPay)}</span></div>
     <div class="stat-row"><span class="stat-label">Já Pago</span><span class="stat-value text-green fnum">R$ ${fmt(calc.totalPaid)}</span></div>
@@ -796,6 +796,7 @@ function toggleFixedPaid(catId, itemId, val) {
   const it = getFixedItem(catId, itemId);
   if (it) it.isPaid = val;
   scheduleSave();
+  render(); // Adicione esta linha para forçar a atualização dos totais na tela
 }
 function removeFixedItem(catId, itemId) {
   const cat = getCat(catId);
@@ -843,8 +844,11 @@ function addCardItem(cardId) {
 }
 function setCardVal(cardId, itemId, raw) {
   const it = getCardItem(cardId, itemId);
-  if (it) it.value = parseFloat((raw||'').replace(',','.')) || 0;
+  if (it) {
+    it.value = parseFloat((raw || '').replace(/\./g, '').replace(',', '.')) || 0;
+  }
   scheduleSave();
+  render(); // Adicione isso aqui
 }
 function setInstall(cardId, itemId, which, val) {
   const it = getCardItem(cardId, itemId);
