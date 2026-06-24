@@ -118,7 +118,8 @@
   /* Color picker */
   .color-btn { background: none; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 4px; color: rgba(255,255,255,.85); flex-shrink: 0; }
   .color-btn:hover { background: rgba(0,0,0,.25); }
-  .color-popup { position:fixed; z-index:9999; background:#1c1c1e; border:1px solid var(--border); border-radius:8px; padding:8px; width:200px; box-shadow:0 8px 32px rgba(0,0,0,.7); max-height:200px; overflow-y:auto; }  .color-grid { display:grid; grid-template-columns:repeat(6,1fr); gap:6px; }
+  .color-popup { position:fixed; z-index:9999; background:#1c1c1e; border:1px solid var(--border); border-radius:8px; padding:8px; width:200px; box-shadow:0 8px 32px rgba(0,0,0,.7); max-height:200px; overflow-y:auto; }
+  .color-grid { display:grid; grid-template-columns:repeat(6,1fr); gap:6px; }
   .color-swatch { width:26px; height:26px; border-radius:4px; border:2px solid transparent; cursor:pointer; transition:border-color .1s; }
   .color-swatch:hover { border-color: rgba(255,255,255,.4); }
   .color-swatch.active { border-color: #fff; }
@@ -136,13 +137,44 @@
   .form-label { font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--text3); margin-bottom: 4px; display: block; }
 
   /* Forecast */
-  .forecast-modal { background: var(--bg1); border: 1px solid var(--border); border-radius: 12px; width: 100%; max-width: 860px; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; }
+  .forecast-modal {
+    background: var(--bg1); border: 1px solid var(--border); border-radius: 12px;
+    width: 100%; max-width: 860px; max-height: 90vh;
+    overflow: hidden;           /* só o modal em si */
+    display: flex; flex-direction: column;
+  }
   .forecast-body { overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
-  .forecast-month { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-  .forecast-month-header { padding: 8px 12px; background: rgba(0,0,0,.3); display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-light); }
+  .forecast-month {
+    border: 1px solid var(--border); border-radius: 8px;
+    overflow: visible;          /* ← era hidden; nunca mais corta conteúdo */
+  }
+  .forecast-month-header { padding: 8px 12px; background: rgba(0,0,0,.3); display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-light); border-radius: 8px 8px 0 0; }
   .forecast-card { border-left: 3px solid; padding: 6px 12px; border-bottom: 1px solid var(--border-light); }
   .forecast-card:last-child { border-bottom: none; }
-  .forecast-item { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--text3); line-height: 1.6; }
+
+  /* ── FORECAST ITEM: grid de 2 colunas — descrição cresce, valor fixo à direita ── */
+  .forecast-item {
+    display: grid;
+    grid-template-columns: 1fr auto;  /* label ocupa o espaço todo; valor não encolhe */
+    align-items: baseline;
+    column-gap: 12px;
+    font-size: 11px;
+    color: var(--text3);
+    line-height: 1.7;
+    width: 100%;                       /* garante que ocupa a largura do card */
+  }
+  .forecast-item-label {
+    min-width: 0;
+    white-space: normal;               /* quebra linha livremente */
+    word-break: break-word;
+  }
+  .forecast-item-value {
+    white-space: nowrap;               /* valor nunca quebra */
+    font-variant-numeric: tabular-nums;
+    color: var(--text2);
+    font-weight: 500;
+    text-align: right;
+  }
 
   /* Misc */
   .empty { padding: 24px; text-align: center; font-size: 12px; color: var(--text3); }
@@ -173,7 +205,7 @@
 const SB_URL = 'https://lpvwgjjwkfzfflcyjcsk.supabase.co';
 const SB_KEY = 'sb_publishable_aGixigwvOEFOP4eSGTPsMA_VgBqMquj';
 const SB_TABLE = 'controle_financeiro';
-const SB_ROW_ID = 'main'; // single-row approach: all state in one JSON column
+const SB_ROW_ID = 'main';
 
 const sbHeaders = {
   'apikey': SB_KEY,
@@ -182,7 +214,6 @@ const sbHeaders = {
   'Prefer': 'return=minimal'
 };
 
-// Supabase REST helpers
 async function sbSelect() {
   const res = await fetch(`${SB_URL}/rest/v1/${SB_TABLE}?id=eq.${SB_ROW_ID}&select=data`, {
     headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
@@ -201,15 +232,11 @@ async function sbUpsert(data) {
   return res.ok || res.status === 201 || res.status === 204;
 }
 
-// Attempt to create the table via RPC if it doesn't exist yet
 async function ensureTable() {
-  // First, check if table exists by querying it
   const res = await fetch(`${SB_URL}/rest/v1/${SB_TABLE}?limit=1`, {
     headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
   });
-  if (res.ok) return true; // table exists
-
-  // Try creating via SQL RPC
+  if (res.ok) return true;
   const sql = `
     CREATE TABLE IF NOT EXISTS public.${SB_TABLE} (
       id TEXT PRIMARY KEY,
@@ -247,6 +274,10 @@ const esc = str => String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').re
 let state = null;
 let saveTimeout = null;
 
+// Rastreia se um item de cartão é "novo" (recém-criado, ainda sem valor)
+// Chave: itemId → true enquanto o campo valor nunca foi preenchido
+const _newItems = new Set();
+
 function defaultMonth() {
   return { summary: { rendaMensal: 0 }, fixedCosts: [], cards: [] };
 }
@@ -274,7 +305,7 @@ function rollMonth(prev) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// PERSISTENCE — Supabase + localStorage fallback
+// PERSISTENCE
 // ═══════════════════════════════════════════════════════════════
 const LS_KEY = 'cf_v5';
 
@@ -290,7 +321,6 @@ async function loadState() {
     }
   } catch(e) { console.warn('Supabase load failed, using localStorage', e); }
 
-  // Fallback to localStorage
   try {
     const ls = localStorage.getItem(LS_KEY);
     if (ls) { state = { ...JSON.parse(ls), isUnlocked: false }; setSaveStatus('saved'); return; }
@@ -310,12 +340,10 @@ async function doSaveNow() {
   clearTimeout(saveTimeout);
   setSaveStatus('saving');
   const payload = { ...state };
-  delete payload.isUnlocked; // don't persist lock state
+  delete payload.isUnlocked;
 
-  // Always write to localStorage immediately
   try { localStorage.setItem(LS_KEY, JSON.stringify(payload)); } catch(e) {}
 
-  // Then try Supabase
   try {
     const ok = await sbUpsert(payload);
     setSaveStatus(ok ? 'saved' : 'error');
@@ -432,8 +460,6 @@ function renderLock() {
 }
 function bindLock() {
   document.getElementById('lock-pass').addEventListener('keydown', e => { if(e.key==='Enter') doUnlock(); });
-  
-  // Verifica se o Supabase está respondendo
   fetch(`${SB_URL}/rest/v1/config?limit=1`, {
     headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
   })
@@ -450,18 +476,13 @@ async function doUnlock() {
   const input = document.getElementById('lock-pass');
   const btn = event.target;
   const val = input.value;
-  
   btn.disabled = true;
   btn.textContent = 'Validando...';
-  
   try {
-    // Consulta a tabela 'config' no Supabase
     const res = await fetch(`${SB_URL}/rest/v1/config?id=eq.auth&select=senha`, {
       headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
     });
     const data = await res.json();
-    
-    // Verifica se retornou algo e se a senha confere
     if (data.length > 0 && data[0].senha === val) {
       state.isUnlocked = true;
       render();
@@ -532,13 +553,13 @@ function renderSummary(calc, summary) {
   return `
   <div class="panel">
     <div class="panel-header"><div class="panel-title">${I.trend(13)} Resumo Financeiro</div></div>
-<div class="stat-row">
-  <span class="stat-label">Renda Mensal</span>
-  <input class="stat-input" type="text" inputmode="decimal"
-    value="${summary.rendaMensal ? fmt(summary.rendaMensal) : ''}" placeholder="0,00"
-    onblur="updateSummary('rendaMensal', this.value); formatAmt(this); render();"
-    onkeydown="if(event.key==='Enter' || event.key==='Tab') { updateSummary('rendaMensal', this.value); render(); }"/>
-</div>
+    <div class="stat-row">
+      <span class="stat-label">Renda Mensal</span>
+      <input class="stat-input" type="text" inputmode="decimal"
+        value="${summary.rendaMensal ? fmt(summary.rendaMensal) : ''}" placeholder="0,00"
+        onblur="updateSummary('rendaMensal', this.value); formatAmt(this); render();"
+        onkeydown="if(event.key==='Enter' || event.key==='Tab') { updateSummary('rendaMensal', this.value); render(); }"/>
+    </div>
     <div class="stat-row"><span class="stat-label">A Receber</span><span class="stat-value text-green fnum">R$ ${fmt(calc.totalReceiv)}</span></div>
     <div class="stat-row"><span class="stat-label">Total do Mês</span><span class="stat-value fnum">R$ ${fmt(calc.totalToPay)}</span></div>
     <div class="stat-row"><span class="stat-label">Já Pago</span><span class="stat-value text-green fnum">R$ ${fmt(calc.totalPaid)}</span></div>
@@ -589,11 +610,11 @@ function renderCategory(cat, spentByName, effFixed) {
         <input class="item-desc ${it.isPaid?'paid':''}" value="${esc(it.description)}" placeholder="Descrição"
           oninput="getFixedItem('${cat.id}','${it.id}').description=this.value;scheduleSave()"/>
         <div style="display:flex;flex-direction:column;align-items:flex-end">
-<input class="item-amount" type="text" inputmode="decimal" 
-  value="${it.value?fmt(it.value):''}" 
-  placeholder="0,00"
-  onblur="setFixedVal('${cat.id}', '${it.id}', this.value); formatAmt(this); render();"
-  onkeydown="if(event.key==='Tab' || event.key==='Enter') { setFixedVal('${cat.id}', '${it.id}', this.value); render(); }"/>
+          <input class="item-amount" type="text" inputmode="decimal"
+            value="${it.value?fmt(it.value):''}"
+            placeholder="0,00"
+            onblur="setFixedVal('${cat.id}', '${it.id}', this.value); formatAmt(this); render();"
+            onkeydown="if(event.key==='Tab' || event.key==='Enter') { setFixedVal('${cat.id}', '${it.id}', this.value); render(); }"/>
           ${showProv?`<span class="prov-remain ${rem===0?'text-red':'text-green'}">resta R$ ${fmt(rem)}</span>`:''}
         </div>
         <button class="btn-icon" onclick="removeFixedItem('${cat.id}','${it.id}')">${I.x(12)}</button>
@@ -602,7 +623,6 @@ function renderCategory(cat, spentByName, effFixed) {
     <button class="add-row" onclick="addFixedItem('${cat.id}')">${I.plus(11)} Adicionar item</button>
   </div>`;
 }
-
 
 // ─── Cards ───────────────────────────────────────────────────
 function renderCardBlock(card, featured=false) {
@@ -642,47 +662,98 @@ function renderCardBlock(card, featured=false) {
 
 function renderCardItem(cardId, it) {
   const instInvalid = !it.recurrent && it.totalInstallments != null && (it.currentInstallment||1) > it.totalInstallments;
-  
-  // Se for recorrente, desabilita a edição de parcelas.
-  // Se não for recorrente, permite editar. 
-  // Se estiver vazio (null), renderiza os campos zerados ou vazios para preenchimento.
   const isBlocked = it.recurrent;
-  
+
   const instCell = `
     <div class="installment-wrap ${instInvalid ? 'inst-error' : ''} ${isBlocked ? 'text-zinc-600' : ''}">
-      <input type="number" min="1" class="inst-input" 
-        value="${it.totalInstallments ? (it.currentInstallment || 1) : ''}" 
+      <input type="number" min="1" class="inst-input"
+        value="${it.totalInstallments ? (it.currentInstallment || 1) : ''}"
         ${isBlocked ? 'disabled' : ''}
         placeholder="-"
         onchange="setInstall('${cardId}','${it.id}','cur',this.value)" />
       <span>/</span>
-      <input type="number" min="1" class="inst-input" style="text-align:left" 
-        value="${it.totalInstallments || ''}" 
+      <input type="number" min="1" class="inst-input" style="text-align:left"
+        value="${it.totalInstallments || ''}"
         ${isBlocked ? 'disabled' : ''}
         placeholder="-"
         onchange="setInstall('${cardId}','${it.id}','tot',this.value)" />
     </div>`;
+
+  // data-new="true" marca itens recém-criados que ainda não receberam valor
+  const isNew = _newItems.has(it.id);
 
   return `
   <div class="card-cols" data-id="${it.id}">
     <span class="drag-handle">${I.drag(13)}</span>
     <input value="${esc(it.description)}" placeholder="Descrição" style="min-width:0;font-size:13px;width:100%"
       oninput="getCardItem('${cardId}','${it.id}').description=this.value;scheduleSave()"/>
-    <input type="text" inputmode="decimal" value="${it.value?fmt(it.value):''}" placeholder="0,00"
+
+    <input type="text" inputmode="decimal"
+      value="${it.value ? fmt(it.value) : ''}"
+      placeholder="0,00"
+      data-card="${cardId}" data-item="${it.id}" data-isnew="${isNew}"
       style="text-align:right;font-variant-numeric:tabular-nums;font-size:13px;color:var(--text2);width:100%"
-      onchange="setCardVal('${cardId}','${it.id}',this.value)"
-      onblur="formatAmt(this)"/>
+      onblur="onCardValBlur(this)"
+      onkeydown="onCardValKeydown(event, this)"/>
+
     ${instCell}
+
     <input value="${esc(it.responsible||'')}" placeholder="Resp."
       style="font-size:12px;color:var(--text2);width:100%"
       oninput="getCardItem('${cardId}','${it.id}').responsible=this.value;scheduleSave()"
       onkeydown="respKeydown(event,'${cardId}','${it.id}')"/>
+
     <div style="display:flex;align-items:center;gap:1px">
       <button class="btn-icon ${it.recurrent?'recurrence-active':''}" title="${it.recurrent?'Desativar':'Ativar'} recorrência"
         onclick="toggleRecurrent('${cardId}','${it.id}')">${I.repeat(11)}</button>
       <button class="btn-icon" onclick="removeCardItem('${cardId}','${it.id}')">${I.x(12)}</button>
     </div>
   </div>`;
+}
+
+// ── Handlers do campo Valor do cartão ───────────────────────
+
+// onblur: sempre salva o valor e reformata; re-render só se NÃO for item novo
+// (para item novo o Tab/Enter já despachou re-render antes de perder o foco)
+function onCardValBlur(el) {
+  const cardId = el.dataset.card;
+  const itemId = el.dataset.item;
+  const isNew  = el.dataset.isnew === 'true';
+
+  const prev = getCardItem(cardId, itemId)?.value || 0;
+  setCardVal(cardId, itemId, el.value);
+  formatAmt(el);
+
+  const newVal = getCardItem(cardId, itemId)?.value || 0;
+
+  if (!isNew) {
+    // Edição de item existente → re-render para atualizar totais imediatamente
+    render();
+  }
+  // Para item novo: não re-rendeirza aqui; o usuário ainda está preenchendo os outros campos
+}
+
+// onkeydown: Tab/Enter no campo valor
+function onCardValKeydown(event, el) {
+  if (event.key !== 'Tab' && event.key !== 'Enter') return;
+
+  const cardId = el.dataset.card;
+  const itemId = el.dataset.item;
+  const isNew  = el.dataset.isnew === 'true';
+
+  setCardVal(cardId, itemId, el.value);
+  formatAmt(el);
+
+  if (isNew) {
+    // Item novo → deixa o Tab seguir naturalmente para as parcelas e depois o responsável
+    // Não re-renderiza para não quebrar o foco
+    if (event.key === 'Enter') event.preventDefault();
+    // Tab vai naturalmente para o próximo input
+  } else {
+    // Item existente → salva e re-renderiza para atualizar os totais
+    if (event.key === 'Enter') event.preventDefault();
+    render();
+  }
 }
 
 function renderOtherCards(cards) {
@@ -742,10 +813,8 @@ function toggleCP(id, e) {
   const el = document.getElementById(id);
   const btn = e.target.closest('.color-btn');
   if (!el || !btn) return;
-  
   const wasH = el.classList.contains('hidden');
   document.querySelectorAll('.color-popup').forEach(p => p.classList.add('hidden'));
-  
   if (wasH) {
     const rect = btn.getBoundingClientRect();
     el.style.top = (rect.bottom + 4) + 'px';
@@ -796,21 +865,13 @@ function toggleFixedPaid(catId, itemId, val) {
   const it = getFixedItem(catId, itemId);
   if (it) it.isPaid = val;
   scheduleSave();
-  render(); // Adicione esta linha para forçar a atualização dos totais na tela
+  render();
 }
 function removeFixedItem(catId, itemId) {
   const cat = getCat(catId);
   if (!cat) return;
   cat.items = cat.items.filter(i=>i.id!==itemId);
   scheduleSave(); render();
-}
-function fixedKeydown(e, catId, itemId) {
-  if (e.key === 'Tab' || e.key === 'Enter') {
-    setFixedVal(catId, itemId, e.target.value);
-    // Força uma atualização visual rápida dos totais
-    updateUI(); 
-    if (e.key === 'Enter') e.preventDefault();
-  }
 }
 
 // ─── Cards ───────────────────────────────────────────────────
@@ -834,21 +895,32 @@ function toggleCardPaid(cardId) {
   else { const t=card.items.reduce((a,i)=>a+i.value,0); card.isPaid=true; card.paidAmount=t; card.paidAt=new Date().toISOString().slice(0,10); }
   scheduleSave(); render();
 }
+
 function addCardItem(cardId) {
-  getCard(cardId)?.items.push({ id:uid(), description:'', value:0, currentInstallment:null, totalInstallments:null, responsible:'Eu', isPaid:false, recurrent:false });
+  const newId = uid();
+  _newItems.add(newId); // marca como novo — Tab pode fluir livremente
+  getCard(cardId)?.items.push({
+    id: newId, description:'', value:0,
+    currentInstallment:null, totalInstallments:null,
+    responsible:'Eu', isPaid:false, recurrent:false
+  });
   scheduleSave(); render();
   setTimeout(() => {
     const list = document.getElementById(`items-${cardId}`);
     if (list) { const ins = list.querySelectorAll('input[placeholder="Descrição"]'); ins[ins.length-1]?.focus(); }
   }, 60);
 }
+
 function setCardVal(cardId, itemId, raw) {
   const it = getCardItem(cardId, itemId);
   if (it) {
     it.value = parseFloat((raw || '').replace(/\./g, '').replace(',', '.')) || 0;
+    // Se recebeu um valor, o item não é mais "novo"
+    if (it.value > 0) _newItems.delete(itemId);
   }
   scheduleSave();
 }
+
 function setInstall(cardId, itemId, which, val) {
   const it = getCardItem(cardId, itemId);
   if (!it) return;
@@ -868,12 +940,17 @@ function removeCardItem(cardId, itemId) {
   const card = getCard(cardId);
   if (!card) return;
   card.items = card.items.filter(i=>i.id!==itemId);
+  _newItems.delete(itemId);
   scheduleSave(); render();
 }
+
+// Ao sair do campo Responsável com Enter/Tab → cria novo item
 function respKeydown(e, cardId, itemId) {
   if (e.key==='Enter' || (e.key==='Tab' && !e.shiftKey)) {
     e.preventDefault();
     getCardItem(cardId,itemId).responsible = e.target.value;
+    // Ao concluir o responsável, o item não é mais "novo"
+    _newItems.delete(itemId);
     addCardItem(cardId);
   }
 }
@@ -909,7 +986,6 @@ function copyReceiv(name) {
   if (!data) return;
   const text = `${name}\n\n${data.details.map(x=>'• '+x).join('\n')}\n\nTotal: R$ ${fmt(data.total)}`;
   navigator.clipboard.writeText(text).catch(()=>alert(text));
-  // Visual feedback
   document.querySelectorAll('.receiv-copy').forEach(b => {
     if (b.getAttribute('onclick')?.includes(`'${name}'`) || b.getAttribute('onclick')?.includes(`"${name}"`)) {
       b.innerHTML = I.check(11) + ' Copiado!';
@@ -1041,18 +1117,18 @@ function openForecast() {
           ? '<div class="empty" style="padding:12px">Sem parcelas neste mês.</div>'
           : m.perCard.filter(c=>c.items.length>0).map(({card,items,total}) => `
           <div class="forecast-card" style="border-color:${card.color}">
-            <div class="forecast-card-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
               <span style="font-size:12px;font-weight:700">${esc(card.name)}</span>
-              <span style="font-size:12px;font-weight:700;font-variant-numeric:tabular-nums">R$ ${fmt(total)}</span>
+              <span style="font-size:12px;font-weight:700;font-variant-numeric:tabular-nums;flex-shrink:0;margin-left:8px">R$ ${fmt(total)}</span>
             </div>
             ${items.map(({it,installment}) => `
             <div class="forecast-item">
-              <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+              <span class="forecast-item-label">
                 ${esc(it.description)}
-                <span style="color:var(--text3)">(${installment}${typeof installment==='number'?'/'+it.totalInstallments:''})</span>
+                <span style="color:var(--text3);margin-left:3px">(${installment}${typeof installment==='number'?'/'+it.totalInstallments:''})</span>
                 ${it.responsible&&it.responsible!=='Eu'?`<span style="color:var(--text3)"> · ${esc(it.responsible)}</span>`:''}
               </span>
-              <span style="font-variant-numeric:tabular-nums;flex-shrink:0">R$ ${fmt(it.value)}</span>
+              <span class="forecast-item-value">R$ ${fmt(it.value)}</span>
             </div>`).join('')}
           </div>`).join('')}
       </div>`).join('')}
@@ -1065,7 +1141,6 @@ function openForecast() {
 // INIT
 // ═══════════════════════════════════════════════════════════════
 (async function init() {
-  // Show a loading screen first
   document.getElementById('app').innerHTML = `
   <div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--text3)">
     <div style="width:40px;height:40px;border:2px solid var(--border);border-top-color:var(--green);border-radius:50%;animation:spin .8s linear infinite"></div>
@@ -1073,7 +1148,6 @@ function openForecast() {
   </div>
   <style>@keyframes spin{to{transform:rotate(360deg)}}</style>`;
 
-  // Try to ensure table exists (best-effort)
   try { await ensureTable(); } catch(e) { console.warn('ensureTable:', e); }
 
   await loadState();
