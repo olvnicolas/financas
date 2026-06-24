@@ -589,9 +589,11 @@ function renderCategory(cat, spentByName, effFixed) {
         <input class="item-desc ${it.isPaid?'paid':''}" value="${esc(it.description)}" placeholder="Descrição"
           oninput="getFixedItem('${cat.id}','${it.id}').description=this.value;scheduleSave()"/>
         <div style="display:flex;flex-direction:column;align-items:flex-end">
-          <input class="item-amount" type="text" inputmode="decimal" value="${it.value?fmt(it.value):''}" placeholder="0,00"
-            onchange="setFixedVal('${cat.id}','${it.id}',this.value)"
-            onblur="formatAmt(this)"/>
+<input class="item-amount" type="text" inputmode="decimal" 
+  value="${it.value?fmt(it.value):''}" 
+  placeholder="0,00"
+  onblur="setFixedVal('${cat.id}', '${it.id}', this.value); formatAmt(this); render();"
+  onkeydown="if(event.key==='Tab' || event.key==='Enter') { setFixedVal('${cat.id}', '${it.id}', this.value); render(); }"/>
           ${showProv?`<span class="prov-remain ${rem===0?'text-red':'text-green'}">resta R$ ${fmt(rem)}</span>`:''}
         </div>
         <button class="btn-icon" onclick="removeFixedItem('${cat.id}','${it.id}')">${I.x(12)}</button>
@@ -600,6 +602,7 @@ function renderCategory(cat, spentByName, effFixed) {
     <button class="add-row" onclick="addFixedItem('${cat.id}')">${I.plus(11)} Adicionar item</button>
   </div>`;
 }
+
 
 // ─── Cards ───────────────────────────────────────────────────
 function renderCardBlock(card, featured=false) {
@@ -799,6 +802,14 @@ function removeFixedItem(catId, itemId) {
   if (!cat) return;
   cat.items = cat.items.filter(i=>i.id!==itemId);
   scheduleSave(); render();
+}
+function fixedKeydown(e, catId, itemId) {
+  if (e.key === 'Tab' || e.key === 'Enter') {
+    setFixedVal(catId, itemId, e.target.value);
+    // Força uma atualização visual rápida dos totais
+    updateUI(); 
+    if (e.key === 'Enter') e.preventDefault();
+  }
 }
 
 // ─── Cards ───────────────────────────────────────────────────
