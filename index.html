@@ -432,21 +432,48 @@ function renderLock() {
 }
 function bindLock() {
   document.getElementById('lock-pass').addEventListener('keydown', e => { if(e.key==='Enter') doUnlock(); });
-  // Check connection status
-  sbSelect().then(v => {
+  
+  // Verifica se o Supabase está respondendo
+  fetch(`${SB_URL}/rest/v1/config?limit=1`, {
+    headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+  })
+  .then(res => {
     const el = document.getElementById('conn-status');
-    if (el) el.textContent = v !== null ? 'Conectado ao Supabase ✓' : 'Supabase sem dados ainda';
-  }).catch(() => {
+    if (el) el.textContent = res.ok ? 'Segurança online ✓' : 'Segurança offline ⚠';
+  })
+  .catch(() => {
     const el = document.getElementById('conn-status');
-    if (el) el.textContent = 'Sem conexão — usando armazenamento local';
+    if (el) el.textContent = 'Servidor de segurança inacessível';
   });
 }
-function doUnlock() {
-  const v = document.getElementById('lock-pass').value;
-  if (v === '11062021') { state.isUnlocked = true; render(); }
-  else {
-    document.getElementById('lock-err').classList.remove('hidden');
-    document.getElementById('lock-pass').value = '';
+async function doUnlock() {
+  const input = document.getElementById('lock-pass');
+  const btn = event.target;
+  const val = input.value;
+  
+  btn.disabled = true;
+  btn.textContent = 'Validando...';
+  
+  try {
+    // Consulta a tabela 'config' no Supabase
+    const res = await fetch(`${SB_URL}/rest/v1/config?id=eq.auth&select=senha`, {
+      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+    });
+    const data = await res.json();
+    
+    // Verifica se retornou algo e se a senha confere
+    if (data.length > 0 && data[0].senha === val) {
+      state.isUnlocked = true;
+      render();
+    } else {
+      document.getElementById('lock-err').classList.remove('hidden');
+      input.value = '';
+    }
+  } catch(e) {
+    alert('Erro ao conectar com servidor de segurança. Tente novamente.');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Entrar';
   }
 }
 
