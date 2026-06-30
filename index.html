@@ -279,7 +279,7 @@ let saveTimeout = null;
 const _newItems = new Set();
 
 function defaultMonth() {
-  return { summary: { rendaMensal: 0 }, fixedCosts: [], cards: [] };
+  return { summary: { rendaMensal: 0 }, fixedCosts: [], cards: [], advances: {} };
 }
 function defaultState() {
   const now = new Date();
@@ -301,6 +301,15 @@ function rollMonth(prev) {
       return null;
     }).filter(Boolean);
   });
+  // Adiantamentos: se a pessoa pagou mais do que foi cobrado neste mês,
+  // a diferença (crédito) é levada para a próxima competência.
+  const prevCalc = calcMonth(prev);
+  const carried = {};
+  Object.entries(prevCalc.receiv).forEach(([name, d]) => {
+    const leftover = Math.max(0, (d.advance||0) - d.total);
+    if (leftover > 0) carried[norm(name)] = leftover;
+  });
+  next.advances = carried;
   return next;
 }
 
@@ -384,6 +393,13 @@ function calcMonth(month) {
       receiv[r].details.push(`${it.description} (${instLabel}): R$ ${fmt(it.value)}`);
     }
   }));
+  // Aplica os valores adiantados (pagos antes da cobrança) sobre o total de cada pessoa.
+  const advancesMap = month.advances || {};
+  Object.keys(receiv).forEach(name => {
+    const adv = advancesMap[norm(name)] || 0;
+    receiv[name].advance = adv;
+    receiv[name].net = Math.max(0, receiv[name].total - adv);
+  });
   const totalReceiv = Object.values(receiv).reduce((a,b) => a+b.total, 0);
   const saldoProjetado = (month.summary.rendaMensal||0) + totalReceiv - totalToPay;
 
@@ -782,13 +798,37 @@ function renderReceivables(receiv, total) {
       <div class="receiv-person">
         <div style="display:flex;justify-content:space-between;align-items:center">
           <span style="font-size:13px;font-weight:700">${esc(name)}</span>
-          <span class="text-green fnum" style="font-size:13px;font-weight:700">R$ ${fmt(data.total)}</span>
+          <span class="fnum" style="font-size:11px;color:var(--text3)">Gasto: R$ ${fmt(data.total)}</span>
         </div>
         <div style="font-size:10px;color:var(--text3);margin-top:3px;line-height:1.6">${data.details.map(d=>'· '+d).join('<br>')}</div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px">
+          <label style="font-size:10px;color:var(--text3);white-space:nowrap">Adiantado (já pago)</label>
+          <input class="input-field" type="text" inputmode="decimal" style="width:96px;text-align:right;font-size:12px;padding:4px 7px"
+            value="${data.advance?fmt(data.advance):''}" placeholder="0,00"
+            onblur="setAdvance('${esc(name)}', this.value); formatAmt(this); render();"
+            onkeydown="if(event.key==='Enter'||event.key==='Tab'){ setAdvance('${esc(name)}', this.value); render(); }"/>
+        </div>
+
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;padding-top:6px;border-top:1px solid var(--border-light)">
+          <span style="font-size:12px;font-weight:600;color:var(--text2)">A cobrar</span>
+          <span class="${data.net>0?'text-green':'text-cyan'} fnum" style="font-size:15px;font-weight:700">R$ ${fmt(data.net)}</span>
+        </div>
+
         <button class="receiv-copy" onclick="copyReceiv('${esc(name)}')">${I.copy(11)} Copiar cobrança</button>
       </div>`).join('')}
     </div>
   </div>`;
+}
+
+function setAdvance(name, raw) {
+  const m = cur();
+  if (!m.advances) m.advances = {};
+  const n = parseFloat((raw||'').replace(',','.'));
+  const key = norm(name);
+  if (isNaN(n) || n<=0) delete m.advances[key];
+  else m.advances[key] = n;
+  scheduleSave();
 }
 
 // ─── Color Picker ────────────────────────────────────────────
@@ -984,7 +1024,12 @@ function copyReceiv(name) {
   const calc = calcMonth(month);
   const data = calc.receiv[name];
   if (!data) return;
-  const text = `${name}\n\n${data.details.map(x=>'• '+x).join('\n')}\n\nTotal: R$ ${fmt(data.total)}`;
+  let text = `${name}\n\n${data.details.map(x=>'• '+x).join('\n')}\n\nTotal: R$ ${fmt(data.total)}`;
+  if (data.advance > 0) {
+    text += `\nAdiantado: R$ ${fmt(data.advance)}\nA cobrar: R$ ${fmt(data.net)}`;
+  } else {
+    text += `\nA cobrar: R$ ${fmt(data.net)}`;
+  }
   navigator.clipboard.writeText(text).catch(()=>alert(text));
   document.querySelectorAll('.receiv-copy').forEach(b => {
     if (b.getAttribute('onclick')?.includes(`'${name}'`) || b.getAttribute('onclick')?.includes(`"${name}"`)) {
