@@ -254,6 +254,47 @@ async function ensureTable() {
   return rpc.ok;
 }
 
+// Tenta validar a senha do lado do servidor (Postgres function com SECURITY DEFINER),
+// em vez de buscar a senha em texto puro pelo cliente. Se a função "verify_password"
+// já existir, nada precisa ser feito. Caso contrário, tenta criá-la via a mesma RPC
+// "exec_sql" usada acima (best-effort: depende do projeto Supabase permitir isso).
+// Se não for possível criar/usar a função segura, o app cai de volta no método antigo.
+async function ensureAuthSecurity() {
+  try {
+    const probe = await fetch(`${SB_URL}/rest/v1/rpc/verify_password`, {
+      method: 'POST', headers: sbHeaders,
+      body: JSON.stringify({ p_senha: '__probe__' })
+    });
+    if (probe.ok) { window.__authRpcAvailable = true; return; }
+  } catch(e) {}
+
+  const sql = `
+    CREATE OR REPLACE FUNCTION public.verify_password(p_senha text)
+    RETURNS boolean
+    LANGUAGE sql
+    SECURITY DEFINER
+    SET search_path = public
+    AS $$
+      SELECT EXISTS (SELECT 1 FROM public.config WHERE id = 'auth' AND senha = p_senha);
+    $$;
+    REVOKE ALL ON FUNCTION public.verify_password(text) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION public.verify_password(text) TO anon, authenticated;
+    ALTER TABLE IF EXISTS public.config ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS "allow_all" ON public.config;
+    DROP POLICY IF EXISTS "anon_select_config" ON public.config;
+  `;
+  try {
+    const rpc = await fetch(`${SB_URL}/rest/v1/rpc/exec_sql`, {
+      method: 'POST', headers: sbHeaders, body: JSON.stringify({ sql })
+    });
+    window.__authRpcAvailable = rpc.ok;
+    if (!rpc.ok) console.warn('Não foi possível criar verify_password — senha continuará sendo checada no cliente.');
+  } catch(e) {
+    window.__authRpcAvailable = false;
+    console.warn('ensureAuthSecurity falhou — senha continuará sendo checada no cliente.', e);
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // CONSTANTS & UTILS
 // ═══════════════════════════════════════════════════════════════
@@ -430,6 +471,10 @@ const I = {
   save:    s => svg('<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>',s),
   chevron: s => svg('<polyline points="6 9 12 15 18 9"/>',s),
   cloud:   s => svg('<path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>',s),
+  pie:     s => svg('<path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/>',s),
+  download:s => svg('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',s),
+  upload:  s => svg('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>',s),
+  star:    s => svg('<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',s),
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -459,6 +504,7 @@ function render() {
 
 // ─── Lock ────────────────────────────────────────────────────
 function renderLock() {
+  const secure = window.__authRpcAvailable;
   return `
   <div id="lock-screen">
     <div class="lock-icon">${I.lock(22)}</div>
@@ -471,6 +517,9 @@ function renderLock() {
     <div id="lock-err" class="hidden" style="font-size:12px;color:var(--red)">Senha incorreta</div>
     <div style="font-size:11px;color:var(--text3);margin-top:8px;display:flex;align-items:center;gap:5px">
       ${I.cloud(11)} <span id="conn-status">Verificando conexão...</span>
+    </div>
+    <div id="auth-mode" style="font-size:10px;margin-top:2px;display:flex;align-items:center;gap:5px;color:${secure?'var(--green)':'#f59e0b'}">
+      ${secure ? I.lock(9)+' Validação segura no servidor (RPC ativo)' : '⚠ Modo legado — senha checada no cliente'}
     </div>
   </div>`;
 }
@@ -495,11 +544,29 @@ async function doUnlock() {
   btn.disabled = true;
   btn.textContent = 'Validando...';
   try {
-    const res = await fetch(`${SB_URL}/rest/v1/config?id=eq.auth&select=senha`, {
-      headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
-    });
-    const data = await res.json();
-    if (data.length > 0 && data[0].senha === val) {
+    let ok = false;
+
+    if (window.__authRpcAvailable) {
+      // Caminho seguro: a senha nunca trafega como resultado de SELECT,
+      // só vai como parâmetro e o servidor responde apenas true/false.
+      const res = await fetch(`${SB_URL}/rest/v1/rpc/verify_password`, {
+        method: 'POST', headers: sbHeaders,
+        body: JSON.stringify({ p_senha: val })
+      });
+      if (res.ok) ok = await res.json();
+      else window.__authRpcAvailable = false; // RPC parou de funcionar, cai no fallback abaixo
+    }
+
+    if (!window.__authRpcAvailable) {
+      // Modo legado (menos seguro — consulta a senha em texto puro pelo cliente).
+      const res = await fetch(`${SB_URL}/rest/v1/config?id=eq.auth&select=senha`, {
+        headers: { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY }
+      });
+      const data = await res.json();
+      ok = data.length > 0 && data[0].senha === val;
+    }
+
+    if (ok) {
       state.isUnlocked = true;
       render();
     } else {
@@ -534,10 +601,14 @@ function renderDashboard() {
         <span style="position:absolute;right:6px;pointer-events:none;color:var(--text3)">${I.chevron(10)}</span>
       </div>
       <button class="btn btn-ghost" onclick="openForecast()">${I.cal(13)} Próx. 6 meses</button>
+      <button class="btn btn-ghost" onclick="openHistory()">${I.trend(13)} Histórico</button>
       <button class="btn btn-primary" onclick="openNewMonth()">${I.plus(13)} Competência</button>
       <button class="btn btn-ghost" onclick="doRefresh()" title="Recriar a partir do mês anterior">${I.refresh(13)} Atualizar</button>
       <button class="btn btn-danger" onclick="doDeleteMonth()">${I.trash(13)} Excluir</button>
       <button class="btn btn-ghost" onclick="doSaveNow()">${I.save(13)} Salvar</button>
+      <button class="btn btn-ghost" onclick="exportBackup()" title="Baixar backup em JSON">${I.download(13)} Backup</button>
+      <button class="btn btn-ghost" onclick="document.getElementById('import-file').click()" title="Importar backup JSON">${I.upload(13)} Importar</button>
+      <input type="file" id="import-file" accept="application/json" class="hidden" onchange="importBackup(this.files[0])"/>
       <div id="save-indicator" class="saved" style="font-size:11px;display:flex;align-items:center;gap:4px;color:var(--green);padding:4px 8px;border-radius:5px">
         ${I.cloud(11)} Salvo
       </div>
@@ -554,6 +625,7 @@ function renderDashboard() {
     </div>
     <div class="col">
       ${renderOtherCards(others)}
+      ${renderCategoryChart(month, calc)}
       ${renderReceivables(calc.receiv, calc.totalReceiv)}
     </div>
   </main>`;
@@ -647,12 +719,14 @@ function renderCardBlock(card, featured=false) {
   const wrap  = featured ? 'panel' : '';
 
   return `
-  <div class="${wrap}" id="card-block-${card.id}">
+  <div class="${wrap}" id="card-block-${card.id}" data-id="${card.id}">
     <div class="cat-header relative" style="background:${card.color}">
+      ${!featured ? `<span class="card-drag-handle" style="cursor:grab;color:rgba(255,255,255,.7);touch-action:none;display:flex;align-items:center;flex-shrink:0">${I.drag(13)}</span>` : ''}
       ${renderColorPicker(card.color, `cardColor('${card.id}',c)`, `cp-card-${card.id}`)}
       ${I.card(13)}
       <input type="text" value="${esc(card.name)}" style="flex:1;min-width:0;background:transparent;font-size:13px;font-weight:600;color:#fff;border:none;outline:none;"
         oninput="getCard('${card.id}').name=this.value;scheduleSave()"/>
+      ${!featured ? `<button class="btn-icon" onclick="promoteCard('${card.id}')" title="Destacar / trocar de posição" style="color:rgba(255,255,255,.75)">${I.star(13)}</button>` : ''}
       <button onclick="toggleCardPaid('${card.id}')"
         style="font-size:11px;font-weight:600;background:rgba(0,0,0,.28);color:#fff;border:none;padding:3px 8px;border-radius:5px;cursor:pointer;display:flex;align-items:center;gap:4px;white-space:nowrap">
         ${card.isPaid ? I.refresh(11)+' Reabrir' : I.check(11)+' Paga'}
@@ -779,8 +853,10 @@ function renderOtherCards(cards) {
       <div class="panel-title">${I.card(13)} Outros Cartões</div>
       <button class="panel-action" onclick="addCard()">${I.plus(11)} Cartão</button>
     </div>
-    ${cards.length===0 ? '<div class="empty">Nenhum cartão extra.</div>' :
-      cards.map(c => `<div style="border-bottom:1px solid var(--border-light)">${renderCardBlock(c,false)}</div>`).join('')}
+    ${cards.length===0 ? '<div class="empty">Nenhum cartão extra.</div>' : `
+    <div id="other-cards-list">
+      ${cards.map(c => `<div style="border-bottom:1px solid var(--border-light)" data-id="${c.id}">${renderCardBlock(c,false)}</div>`).join('')}
+    </div>`}
   </div>`;
 }
 
@@ -1012,6 +1088,32 @@ function bindSortables() {
       }
     });
   });
+
+  const othersEl = document.getElementById('other-cards-list');
+  if (othersEl && !othersEl._sb) {
+    othersEl._sb = true;
+    Sortable.create(othersEl, {
+      handle: '.card-drag-handle', animation: 140, ghostClass: 'sortable-ghost',
+      onEnd: () => {
+        const m = cur();
+        const orderedIds = Array.from(othersEl.children).map(el => el.dataset.id);
+        const featured = m.cards[0];
+        const byId = Object.fromEntries(m.cards.map(c => [c.id, c]));
+        m.cards = [featured, ...orderedIds.map(id => byId[id]).filter(Boolean)];
+        scheduleSave();
+      }
+    });
+  }
+}
+
+// Troca de posição: o cartão clicado vira o destacado (primeiro), e o que
+// estava destacado vai para o lugar dele na lista de "Outros Cartões".
+function promoteCard(cardId) {
+  const cards = cur().cards;
+  const idx = cards.findIndex(c => c.id === cardId);
+  if (idx <= 0) return;
+  [cards[0], cards[idx]] = [cards[idx], cards[0]];
+  scheduleSave(); render();
 }
 
 // ─── Helpers ────────────────────────────────────────────────
@@ -1183,6 +1285,184 @@ function openForecast() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// GASTOS POR CATEGORIA (donut chart)
+// ═══════════════════════════════════════════════════════════════
+function getCategorySlices(month, calc) {
+  const slices = [];
+  month.fixedCosts.forEach(cat => {
+    const total = cat.items.reduce((a,i) => a + Math.max(0, i.value - (calc.spentByName[norm(i.description)]||0)), 0);
+    if (total > 0) slices.push({ name: cat.name, color: cat.color, value: total });
+  });
+  month.cards.forEach(card => {
+    const total = card.items.reduce((a,i) => a + i.value, 0);
+    if (total > 0) slices.push({ name: card.name, color: card.color, value: total });
+  });
+  return slices.sort((a,b) => b.value - a.value);
+}
+
+function renderDonut(slices, size=120, strokeWidth=18) {
+  const total = slices.reduce((a,s) => a + s.value, 0);
+  if (total <= 0) return `<div style="width:${size}px;height:${size}px;display:flex;align-items:center;justify-content:center;border-radius:50%;border:${strokeWidth}px solid var(--bg2)"></div>`;
+  const r = (size - strokeWidth) / 2;
+  const c = 2 * Math.PI * r;
+  let offset = 0;
+  const circles = slices.map(s => {
+    const frac = s.value / total;
+    const len = Math.max(frac * c - 1.5, 0); // pequeno gap entre fatias
+    const dash = `${len} ${c - len}`;
+    const dashoffset = -offset;
+    offset += frac * c;
+    return `<circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="${s.color}" stroke-width="${strokeWidth}" stroke-dasharray="${dash}" stroke-dashoffset="${dashoffset}" transform="rotate(-90 ${size/2} ${size/2})" stroke-linecap="round"/>`;
+  }).join('');
+  return `
+  <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+    ${circles}
+    <text x="50%" y="47%" text-anchor="middle" fill="#f4f4f5" font-size="12" font-weight="700">R$ ${fmt(total)}</text>
+    <text x="50%" y="61%" text-anchor="middle" fill="#71717a" font-size="9">total do mês</text>
+  </svg>`;
+}
+
+function renderCategoryChart(month, calc) {
+  const slices = getCategorySlices(month, calc);
+  const total = slices.reduce((a,s) => a + s.value, 0);
+  return `
+  <div class="panel">
+    <div class="panel-header"><div class="panel-title">${I.pie(13)} Gastos por Categoria</div></div>
+    ${slices.length === 0 ? '<div class="empty">Sem gastos neste mês.</div>' : `
+    <div style="display:flex;gap:16px;align-items:center;padding:14px;flex-wrap:wrap">
+      <div style="flex-shrink:0">${renderDonut(slices)}</div>
+      <div style="flex:1;min-width:140px;display:flex;flex-direction:column;gap:7px">
+        ${slices.map(s => `
+        <div style="display:flex;align-items:center;gap:7px;font-size:12px">
+          <span style="width:9px;height:9px;border-radius:2px;background:${s.color};flex-shrink:0"></span>
+          <span style="flex:1;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.name)}</span>
+          <span class="fnum" style="color:var(--text3);font-size:11px;width:34px;text-align:right">${total>0?Math.round(s.value/total*100):0}%</span>
+          <span class="fnum" style="color:var(--text2);width:78px;text-align:right">R$ ${fmt(s.value)}</span>
+        </div>`).join('')}
+      </div>
+    </div>`}
+  </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HISTÓRICO — SALDO PROJETADO (line chart)
+// ═══════════════════════════════════════════════════════════════
+const monthShort = k => { const [y,m] = k.split('-').map(Number); return `${MES[m-1].slice(0,3)}/${String(y).slice(2)}`; };
+
+function buildLineChart(points, width=720, height=210) {
+  const pad = { l:54, r:16, t:16, b:26 };
+  const innerW = width - pad.l - pad.r;
+  const innerH = height - pad.t - pad.b;
+  const values = points.map(p => p.saldo);
+  let min = Math.min(0, ...values), max = Math.max(0, ...values);
+  if (min === max) { min -= 1; max += 1; }
+  const cushion = (max - min) * 0.12 || 1;
+  min -= cushion; max += cushion;
+  const xStep = points.length > 1 ? innerW / (points.length - 1) : 0;
+  const xAt = i => pad.l + i * xStep;
+  const yAt = v => pad.t + innerH - ((v - min) / (max - min)) * innerH;
+  const zeroY = yAt(0);
+
+  const linePoints = points.map((p,i) => `${xAt(i)},${yAt(p.saldo)}`).join(' ');
+  const dots = points.map((p,i) => `
+    <circle cx="${xAt(i)}" cy="${yAt(p.saldo)}" r="4" fill="${p.saldo>=0?'#10b981':'#f43f5e'}" stroke="#09090b" stroke-width="1.5">
+      <title>${p.label}: R$ ${fmt(p.saldo)}</title>
+    </circle>`).join('');
+  const step = Math.max(1, Math.ceil(points.length / 8));
+  const labels = points.map((p,i) => (i % step === 0 || i === points.length-1) ? `
+    <text x="${xAt(i)}" y="${height-7}" text-anchor="middle" font-size="10" fill="#71717a">${p.label}</text>` : '').join('');
+
+  return `
+  <svg width="100%" viewBox="0 0 ${width} ${height}" style="display:block;overflow:visible">
+    <line x1="${pad.l}" y1="${zeroY}" x2="${width-pad.r}" y2="${zeroY}" stroke="#3f3f46" stroke-dasharray="3 3"/>
+    <text x="${pad.l-8}" y="${zeroY+3}" text-anchor="end" font-size="9" fill="#71717a">R$ 0</text>
+    <text x="${pad.l-8}" y="${pad.t+8}" text-anchor="end" font-size="9" fill="#71717a">${fmt(max)}</text>
+    <text x="${pad.l-8}" y="${height-pad.b}" text-anchor="end" font-size="9" fill="#71717a">${fmt(min)}</text>
+    <polyline points="${linePoints}" fill="none" stroke="#10b981" stroke-width="2"/>
+    ${dots}
+    ${labels}
+  </svg>`;
+}
+
+function openHistory() {
+  const keys = Object.keys(state.months).sort();
+  const points = keys.map(k => {
+    const c = calcMonth(state.months[k]);
+    return { key:k, label: monthShort(k), saldo:c.saldoProjetado, totalToPay:c.totalToPay, totalPaid:c.totalPaid, totalReceiv:c.totalReceiv };
+  });
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.addEventListener('click', ()=>overlay.remove());
+  overlay.innerHTML = `
+  <div class="forecast-modal" onclick="event.stopPropagation()">
+    <div class="modal-header" style="position:sticky;top:0;background:var(--bg1);z-index:10">
+      <div style="display:flex;align-items:center;gap:8px">${I.trend(15)} <span class="modal-title">Histórico · Saldo Projetado</span></div>
+      <button class="btn-icon" onclick="this.closest('.modal-overlay').remove()">${I.x(15)}</button>
+    </div>
+    <div class="forecast-body">
+      ${points.length < 2
+        ? '<div class="empty">Crie mais competências para ver a evolução do saldo ao longo do tempo.</div>'
+        : `<div style="padding:8px 4px 0">${buildLineChart(points)}</div>`}
+      <div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:4px;padding:7px 12px;background:rgba(0,0,0,.3);font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text3)">
+          <span>Mês</span><span style="text-align:right">Total</span><span style="text-align:right">Pago</span><span style="text-align:right">A receber</span><span style="text-align:right">Saldo</span>
+        </div>
+        ${points.slice().reverse().map(p => `
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:4px;padding:7px 12px;border-top:1px solid var(--border-light);font-size:12px;align-items:center">
+          <span>${p.label}</span>
+          <span class="fnum" style="text-align:right">R$ ${fmt(p.totalToPay)}</span>
+          <span class="fnum text-green" style="text-align:right">R$ ${fmt(p.totalPaid)}</span>
+          <span class="fnum text-green" style="text-align:right">R$ ${fmt(p.totalReceiv)}</span>
+          <span class="fnum ${p.saldo>=0?'text-green':'text-red'}" style="text-align:right;font-weight:700">R$ ${fmt(p.saldo)}</span>
+        </div>`).join('')}
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// BACKUP / RESTAURAÇÃO MANUAL
+// ═══════════════════════════════════════════════════════════════
+function exportBackup() {
+  const payload = { ...state };
+  delete payload.isUnlocked;
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const today = new Date().toISOString().slice(0,10);
+  a.href = url;
+  a.download = `controle-financeiro-backup-${today}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function importBackup(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    let parsed;
+    try { parsed = JSON.parse(reader.result); }
+    catch(e) { alert('Arquivo inválido: não é um JSON válido.'); return; }
+    if (!parsed || typeof parsed !== 'object' || !parsed.months || !parsed.currentMonth) {
+      alert('Arquivo inválido: não parece ser um backup deste app.');
+      return;
+    }
+    if (!confirm('Importar este backup vai SUBSTITUIR todos os dados atuais (local e na nuvem). Deseja continuar?')) return;
+    state = { ...parsed, isUnlocked: true };
+    scheduleSave(true);
+    render();
+  };
+  reader.onerror = () => alert('Erro ao ler o arquivo.');
+  reader.readAsText(file);
+  const input = document.getElementById('import-file');
+  if (input) input.value = '';
+}
+
+// ═══════════════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════════════
 (async function init() {
@@ -1194,6 +1474,7 @@ function openForecast() {
   <style>@keyframes spin{to{transform:rotate(360deg)}}</style>`;
 
   try { await ensureTable(); } catch(e) { console.warn('ensureTable:', e); }
+  try { await ensureAuthSecurity(); } catch(e) { console.warn('ensureAuthSecurity:', e); }
 
   await loadState();
   render();
@@ -1201,3 +1482,4 @@ function openForecast() {
 </script>
 </body>
 </html>
+
