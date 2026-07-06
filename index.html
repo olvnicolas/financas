@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -346,9 +347,9 @@ function rollMonth(prev) {
   // a diferença (crédito) é levada para a próxima competência.
   const prevCalc = calcMonth(prev);
   const carried = {};
-  Object.entries(prevCalc.receiv).forEach(([name, d]) => {
+  Object.entries(prevCalc.receiv).forEach(([key, d]) => {
     const leftover = Math.max(0, (d.advance||0) - d.total);
-    if (leftover > 0) carried[norm(name)] = leftover;
+    if (leftover > 0) carried[key] = leftover;
   });
   next.advances = carried;
   return next;
@@ -414,37 +415,79 @@ function calcMonth(month) {
   }));
   const effFixed = it => Math.max(0, it.value - (spentByName[norm(it.description)]||0));
 
+  // Cartões que pertencem a outra pessoa: o nome do cartão bate com alguém
+  // que já aparece como "responsável" em algum lançamento. Esses cartões
+  // não são meus — não entram no meu resumo financeiro (total a pagar,
+  // pago, saldo projetado), só aparecem em "A Receber" daquela pessoa.
+  const responsibleNames = new Set();
+  month.cards.forEach(card => card.items.forEach(it => {
+    const r = (it.responsible||'').trim();
+    if (r && r !== '-' && r.toLowerCase() !== 'eu') responsibleNames.add(norm(r));
+  }));
+  const otherCardNames = new Set();
+  month.cards.forEach(card => { if (responsibleNames.has(norm(card.name))) otherCardNames.add(norm(card.name)); });
+  const isOtherCard = card => otherCardNames.has(norm(card.name));
+  const myCards = month.cards.filter(c => !isOtherCard(c));
+  const otherCards = month.cards.filter(c => isOtherCard(c));
+
   const totalFixed = month.fixedCosts.reduce((a,c) => a + c.items.reduce((b,i) => b + effFixed(i), 0), 0);
-  const totalCards = month.cards.reduce((a,c) => a + c.items.reduce((b,i) => b + i.value, 0), 0);
+  const totalCards = myCards.reduce((a,c) => a + c.items.reduce((b,i) => b + i.value, 0), 0);
   const paidFixed  = month.fixedCosts.reduce((a,c) => a + c.items.filter(i=>i.isPaid).reduce((b,i) => b + effFixed(i), 0), 0);
-  const paidCards  = month.cards.reduce((a,c) => {
+  const paidCards  = myCards.reduce((a,c) => {
     if (c.isPaid) return a + (c.paidAmount ?? c.items.reduce((b,i)=>b+i.value,0));
     return a;
   }, 0);
   const totalToPay = totalFixed + totalCards;
   const totalPaid  = paidFixed + paidCards;
 
+  // receiv é indexado pela chave normalizada do nome (evita duplicar a
+  // mesma pessoa por causa de maiúsculas/minúsculas diferentes).
   const receiv = {};
-  month.cards.forEach(card => card.items.forEach(it => {
+  const ensureReceiv = rawName => {
+    const key = norm(rawName);
+    if (!receiv[key]) receiv[key] = { name: rawName.trim(), total:0, details:[] };
+    return receiv[key];
+  };
+
+  let totalReceivMine = 0;
+  myCards.forEach(card => card.items.forEach(it => {
     const r = (it.responsible||'').trim();
     if (r && r !== '-' && r.toLowerCase() !== 'eu') {
-      if (!receiv[r]) receiv[r] = { total:0, details:[] };
-      receiv[r].total += it.value;
+      const entry = ensureReceiv(r);
+      entry.total += it.value;
+      totalReceivMine += it.value;
       const instLabel = it.recurrent ? '🔁' : (it.totalInstallments ? `${it.currentInstallment||1}/${it.totalInstallments}` : '1/1');
-      receiv[r].details.push(`${it.description} (${instLabel}): R$ ${fmt(it.value)}`);
+      entry.details.push(`${it.description} (${instLabel}): R$ ${fmt(it.value)}`);
     }
   }));
+  // Cartões de outra pessoa: o valor inteiro do cartão vai para a conta
+  // dela, independente do campo "responsável" de cada item — o cartão
+  // não é meu, então não conta no meu resumo, só no que devo repassar.
+  otherCards.forEach(card => {
+    const total = card.items.reduce((a,i)=>a+i.value,0);
+    if (total <= 0) return;
+    const entry = ensureReceiv(card.name);
+    entry.total += total;
+    card.items.forEach(it => {
+      const instLabel = it.recurrent ? '🔁' : (it.totalInstallments ? `${it.currentInstallment||1}/${it.totalInstallments}` : '1/1');
+      entry.details.push(`${it.description} (${instLabel}): R$ ${fmt(it.value)}`);
+    });
+  });
+
   // Aplica os valores adiantados (pagos antes da cobrança) sobre o total de cada pessoa.
   const advancesMap = month.advances || {};
-  Object.keys(receiv).forEach(name => {
-    const adv = advancesMap[norm(name)] || 0;
-    receiv[name].advance = adv;
-    receiv[name].net = Math.max(0, receiv[name].total - adv);
+  Object.values(receiv).forEach(entry => {
+    const adv = advancesMap[norm(entry.name)] || 0;
+    entry.advance = adv;
+    entry.net = Math.max(0, entry.total - adv);
   });
   const totalReceiv = Object.values(receiv).reduce((a,b) => a+b.total, 0);
-  const saldoProjetado = (month.summary.rendaMensal||0) + totalReceiv - totalToPay;
+  // Saldo projetado só considera o que é efetivamente meu: minha renda,
+  // o que vou receber de volta do que EU paguei (totalReceivMine), menos
+  // o que tenho a pagar (que já exclui os cartões de outras pessoas).
+  const saldoProjetado = (month.summary.rendaMensal||0) + totalReceivMine - totalToPay;
 
-  return { totalToPay, totalPaid, faltaPagar: totalToPay-totalPaid, saldoProjetado, receiv, totalReceiv, spentByName };
+  return { totalToPay, totalPaid, faltaPagar: totalToPay-totalPaid, saldoProjetado, receiv, totalReceiv, totalReceivMine, spentByName, otherCardNames };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -621,10 +664,10 @@ function renderDashboard() {
       ${renderFixedCosts(month, calc.spentByName)}
     </div>
     <div class="col">
-      ${primary ? renderCardBlock(primary, true) : `<div class="empty panel" style="padding:32px">Adicione um cartão em "Outros Cartões".</div>`}
+      ${primary ? renderCardBlock(primary, true, calc.otherCardNames.has(norm(primary.name))) : `<div class="empty panel" style="padding:32px">Adicione um cartão em "Outros Cartões".</div>`}
     </div>
     <div class="col">
-      ${renderOtherCards(others)}
+      ${renderOtherCards(others, calc.otherCardNames)}
       ${renderCategoryChart(month, calc)}
       ${renderReceivables(calc.receiv, calc.totalReceiv)}
     </div>
@@ -648,7 +691,7 @@ function renderSummary(calc, summary) {
         onblur="updateSummary('rendaMensal', this.value); formatAmt(this); render();"
         onkeydown="if(event.key==='Enter' || event.key==='Tab') { updateSummary('rendaMensal', this.value); render(); }"/>
     </div>
-    <div class="stat-row"><span class="stat-label">A Receber</span><span class="stat-value text-green fnum">R$ ${fmt(calc.totalReceiv)}</span></div>
+    <div class="stat-row"><span class="stat-label">A Receber</span><span class="stat-value text-green fnum">R$ ${fmt(calc.totalReceivMine)}</span></div>
     <div class="stat-row"><span class="stat-label">Total do Mês</span><span class="stat-value fnum">R$ ${fmt(calc.totalToPay)}</span></div>
     <div class="stat-row"><span class="stat-label">Já Pago</span><span class="stat-value text-green fnum">R$ ${fmt(calc.totalPaid)}</span></div>
     <div class="stat-row" style="border:none"><span class="stat-label">Falta Pagar</span><span class="stat-value text-red fnum">R$ ${fmt(calc.faltaPagar)}</span></div>
@@ -713,7 +756,7 @@ function renderCategory(cat, spentByName, effFixed) {
 }
 
 // ─── Cards ───────────────────────────────────────────────────
-function renderCardBlock(card, featured=false) {
+function renderCardBlock(card, featured=false, isOther=false) {
   const total = card.items.reduce((a,i) => a+i.value, 0);
   const paid  = card.isPaid ? (card.paidAmount ?? total) : 0;
   const wrap  = featured ? 'panel' : '';
@@ -726,6 +769,7 @@ function renderCardBlock(card, featured=false) {
       ${I.card(13)}
       <input type="text" value="${esc(card.name)}" style="flex:1;min-width:0;background:transparent;font-size:13px;font-weight:600;color:#fff;border:none;outline:none;"
         oninput="getCard('${card.id}').name=this.value;scheduleSave()"/>
+      ${isOther ? `<span title="Cartão de outra pessoa — não entra no seu resumo financeiro, só em &quot;A Receber&quot;" style="font-size:9px;font-weight:700;background:rgba(0,0,0,.35);color:#fbbf24;padding:2px 7px;border-radius:10px;white-space:nowrap;flex-shrink:0">terceiro</span>` : ''}
       ${!featured ? `<button class="btn-icon" onclick="promoteCard('${card.id}')" title="Destacar / trocar de posição" style="color:rgba(255,255,255,.75)">${I.star(13)}</button>` : ''}
       <button onclick="toggleCardPaid('${card.id}')"
         style="font-size:11px;font-weight:600;background:rgba(0,0,0,.28);color:#fff;border:none;padding:3px 8px;border-radius:5px;cursor:pointer;display:flex;align-items:center;gap:4px;white-space:nowrap">
@@ -846,7 +890,7 @@ function onCardValKeydown(event, el) {
   }
 }
 
-function renderOtherCards(cards) {
+function renderOtherCards(cards, otherCardNames) {
   return `
   <div class="panel">
     <div class="panel-header">
@@ -855,7 +899,7 @@ function renderOtherCards(cards) {
     </div>
     ${cards.length===0 ? '<div class="empty">Nenhum cartão extra.</div>' : `
     <div id="other-cards-list">
-      ${cards.map(c => `<div style="border-bottom:1px solid var(--border-light)" data-id="${c.id}">${renderCardBlock(c,false)}</div>`).join('')}
+      ${cards.map(c => `<div style="border-bottom:1px solid var(--border-light)" data-id="${c.id}">${renderCardBlock(c,false,otherCardNames.has(norm(c.name)))}</div>`).join('')}
     </div>`}
   </div>`;
 }
@@ -870,10 +914,10 @@ function renderReceivables(receiv, total) {
       <span class="text-green fnum" style="font-size:12px;font-weight:700">R$ ${fmt(total)}</span>
     </div>
     <div style="padding:4px 0">
-      ${entries.length===0 ? '<div class="empty">Sem valores a receber.</div>' : entries.map(([name,data]) => `
+      ${entries.length===0 ? '<div class="empty">Sem valores a receber.</div>' : entries.map(([key,data]) => `
       <div class="receiv-person">
         <div style="display:flex;justify-content:space-between;align-items:center">
-          <span style="font-size:13px;font-weight:700">${esc(name)}</span>
+          <span style="font-size:13px;font-weight:700">${esc(data.name)}</span>
           <span class="fnum" style="font-size:11px;color:var(--text3)">Gasto: R$ ${fmt(data.total)}</span>
         </div>
         <div style="font-size:10px;color:var(--text3);margin-top:3px;line-height:1.6">${data.details.map(d=>'· '+d).join('<br>')}</div>
@@ -882,8 +926,8 @@ function renderReceivables(receiv, total) {
           <label style="font-size:10px;color:var(--text3);white-space:nowrap">Adiantado (já pago)</label>
           <input class="input-field" type="text" inputmode="decimal" style="width:96px;text-align:right;font-size:12px;padding:4px 7px"
             value="${data.advance?fmt(data.advance):''}" placeholder="0,00"
-            onblur="setAdvance('${esc(name)}', this.value); formatAmt(this); render();"
-            onkeydown="if(event.key==='Enter'||event.key==='Tab'){ setAdvance('${esc(name)}', this.value); render(); }"/>
+            onblur="setAdvance('${esc(data.name)}', this.value); formatAmt(this); render();"
+            onkeydown="if(event.key==='Enter'||event.key==='Tab'){ setAdvance('${esc(data.name)}', this.value); render(); }"/>
         </div>
 
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;padding-top:6px;border-top:1px solid var(--border-light)">
@@ -891,7 +935,7 @@ function renderReceivables(receiv, total) {
           <span class="${data.net>0?'text-green':'text-cyan'} fnum" style="font-size:15px;font-weight:700">R$ ${fmt(data.net)}</span>
         </div>
 
-        <button class="receiv-copy" onclick="copyReceiv('${esc(name)}')">${I.copy(11)} Copiar cobrança</button>
+        <button class="receiv-copy" onclick="copyReceiv('${esc(data.name)}')">${I.copy(11)} Copiar cobrança</button>
       </div>`).join('')}
     </div>
   </div>`;
@@ -1124,9 +1168,9 @@ function formatAmt(el) {
 function copyReceiv(name) {
   const month = cur();
   const calc = calcMonth(month);
-  const data = calc.receiv[name];
+  const data = calc.receiv[norm(name)];
   if (!data) return;
-  let text = `${name}\n\n${data.details.map(x=>'• '+x).join('\n')}\n\nTotal: R$ ${fmt(data.total)}`;
+  let text = `${data.name}\n\n${data.details.map(x=>'• '+x).join('\n')}\n\nTotal: R$ ${fmt(data.total)}`;
   if (data.advance > 0) {
     text += `\nAdiantado: R$ ${fmt(data.advance)}\nA cobrar: R$ ${fmt(data.net)}`;
   } else {
@@ -1220,6 +1264,8 @@ function doDeleteMonth() {
 // ═══════════════════════════════════════════════════════════════
 function openForecast() {
   const month = cur();
+  const calc = calcMonth(month);
+  const otherCardNames = calc.otherCardNames;
   const curYear = parseInt(state.currentMonth.split('-')[0]);
   const curMon  = parseInt(state.currentMonth.split('-')[1]);
 
@@ -1238,8 +1284,9 @@ function openForecast() {
         return [];
       });
       const total = items.reduce((a,x)=>a+x.it.value, 0);
-      grandTotal += total;
-      return { card, items, total };
+      const isOther = otherCardNames.has(norm(card.name));
+      if (!isOther) grandTotal += total;
+      return { card, items, total, isOther };
     });
     months.push({ label, perCard, grandTotal });
   }
@@ -1262,10 +1309,13 @@ function openForecast() {
         </div>
         ${m.perCard.filter(c=>c.items.length>0).length===0
           ? '<div class="empty" style="padding:12px">Sem parcelas neste mês.</div>'
-          : m.perCard.filter(c=>c.items.length>0).map(({card,items,total}) => `
+          : m.perCard.filter(c=>c.items.length>0).map(({card,items,total,isOther}) => `
           <div class="forecast-card" style="border-color:${card.color}">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-              <span style="font-size:12px;font-weight:700">${esc(card.name)}</span>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px">
+              <span style="font-size:12px;font-weight:700;display:flex;align-items:center;gap:6px">
+                ${esc(card.name)}
+                ${isOther?`<span style="font-size:9px;font-weight:700;background:rgba(0,0,0,.35);color:#fbbf24;padding:1px 6px;border-radius:10px;white-space:nowrap">não é meu</span>`:''}
+              </span>
               <span style="font-size:12px;font-weight:700;font-variant-numeric:tabular-nums;flex-shrink:0;margin-left:8px">R$ ${fmt(total)}</span>
             </div>
             ${items.map(({it,installment}) => `
@@ -1294,7 +1344,15 @@ function getCategorySlices(month, calc) {
     if (total > 0) slices.push({ name: cat.name, color: cat.color, value: total });
   });
   month.cards.forEach(card => {
-    const total = card.items.reduce((a,i) => a + i.value, 0);
+    // Cartão de outra pessoa: não é meu gasto, não entra no gráfico.
+    if (calc.otherCardNames.has(norm(card.name))) return;
+    // Só conta o que está no meu nome (Eu) — o que é de outro responsável
+    // não é meu gasto, é valor a receber, e já aparece em "A Receber".
+    const total = card.items.reduce((a,i) => {
+      const r = (i.responsible||'').trim();
+      const isMine = !r || r === '-' || r.toLowerCase() === 'eu';
+      return a + (isMine ? i.value : 0);
+    }, 0);
     if (total > 0) slices.push({ name: card.name, color: card.color, value: total });
   });
   return slices.sort((a,b) => b.value - a.value);
@@ -1388,7 +1446,7 @@ function openHistory() {
   const keys = Object.keys(state.months).sort();
   const points = keys.map(k => {
     const c = calcMonth(state.months[k]);
-    return { key:k, label: monthShort(k), saldo:c.saldoProjetado, totalToPay:c.totalToPay, totalPaid:c.totalPaid, totalReceiv:c.totalReceiv };
+    return { key:k, label: monthShort(k), saldo:c.saldoProjetado, totalToPay:c.totalToPay, totalPaid:c.totalPaid, totalReceiv:c.totalReceivMine };
   });
 
   const overlay = document.createElement('div');
@@ -1482,4 +1540,3 @@ function importBackup(file) {
 </script>
 </body>
 </html>
-
