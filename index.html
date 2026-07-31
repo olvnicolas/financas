@@ -847,47 +847,40 @@ function renderCardItem(cardId, it) {
 
 // ── Handlers do campo Valor do cartão ───────────────────────
 
-// onblur: sempre salva o valor e reformata; re-render só se NÃO for item novo
-// (para item novo o Tab/Enter já despachou re-render antes de perder o foco)
+// onblur: sempre salva e re-renderiza para manter os totais em dia.
+// Se o commit já foi feito por Tab/Enter (que dispara render() e remove
+// o campo do DOM), o elemento fica desconectado e este handler não
+// repete o trabalho.
 function onCardValBlur(el) {
+  if (!el.isConnected) return; // já tratado pelo keydown (Tab/Enter)
   const cardId = el.dataset.card;
   const itemId = el.dataset.item;
-  const isNew  = el.dataset.isnew === 'true';
-
-  const prev = getCardItem(cardId, itemId)?.value || 0;
   setCardVal(cardId, itemId, el.value);
   formatAmt(el);
-
-  const newVal = getCardItem(cardId, itemId)?.value || 0;
-
-  if (!isNew) {
-    // Edição de item existente → re-render para atualizar totais imediatamente
-    render();
-  }
-  // Para item novo: não re-rendeirza aqui; o usuário ainda está preenchendo os outros campos
+  render();
 }
 
-// onkeydown: Tab/Enter no campo valor
+// onkeydown: Tab/Enter no campo valor — confirma o valor, re-renderiza
+// para atualizar os totais imediatamente, e move o foco manualmente
+// para o próximo campo da linha (nº de parcela), já que o render()
+// substitui o DOM e o Tab nativo perderia a referência do próximo campo.
 function onCardValKeydown(event, el) {
   if (event.key !== 'Tab' && event.key !== 'Enter') return;
+  event.preventDefault();
 
   const cardId = el.dataset.card;
   const itemId = el.dataset.item;
-  const isNew  = el.dataset.isnew === 'true';
 
   setCardVal(cardId, itemId, el.value);
   formatAmt(el);
+  render();
 
-  if (isNew) {
-    // Item novo → deixa o Tab seguir naturalmente para as parcelas e depois o responsável
-    // Não re-renderiza para não quebrar o foco
-    if (event.key === 'Enter') event.preventDefault();
-    // Tab vai naturalmente para o próximo input
-  } else {
-    // Item existente → salva e re-renderiza para atualizar os totais
-    if (event.key === 'Enter') event.preventDefault();
-    render();
-  }
+  setTimeout(() => {
+    const row = document.querySelector(`.card-cols[data-id="${itemId}"]`);
+    const nextField = row?.querySelector('.inst-input:not([disabled])')
+                    || row?.querySelector('input[placeholder="Resp."]');
+    if (nextField) { nextField.focus(); nextField.select?.(); }
+  }, 0);
 }
 
 function renderOtherCards(cards, otherCardNames) {
